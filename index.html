@@ -1,0 +1,454 @@
+import pandas as pd
+import numpy as np
+import random
+import streamlit as st
+
+# ==============================================================================
+# 1. GLOBAL CONSTANTS & CONFIGURATION
+# ==============================================================================
+SALARY_CAP_LIMIT = 255.4  # $255.4M Cap Limit
+DEFAULT_SCOUTING_PTS = 150
+
+NFL_TEAMS = [
+    "Arizona Cardinals", "Atlanta Falcons", "Baltimore Ravens", "Buffalo Bills",
+    "Carolina Panthers", "Chicago Bears", "Cincinnati Bengals", "Cleveland Browns",
+    "Dallas Cowboys", "Denver Broncos", "Detroit Lions", "Green Bay Packers",
+    "Houston Texans", "Indianapolis Colts", "Jacksonville Jaguars", "Kansas City Chiefs",
+    "Las Vegas Raiders", "Los Angeles Chargers", "Los Angeles Rams", "Miami Dolphins",
+    "Minnesota Vikings", "New England Patriots", "New Orleans Saints", "New York Giants",
+    "New York Jets", "Philadelphia Eagles", "Pittsburgh Steelers", "San Francisco 49ers",
+    "Seattle Seahawks", "Tampa Bay Buccaneers", "Tennessee Titans", "Washington Commanders"
+]
+
+POSITIONS = ["QB", "RB", "WR", "TE", "OT", "OG", "C", "DE", "DT", "OLB", "MLB", "CB", "S", "K", "P"]
+
+# Exact 53-Man Roster Breakdown
+ROSTER_53_DISTRIBUTION = {
+    "QB": 3, "RB": 4, "WR": 6, "TE": 3, "OT": 4, "OG": 4, "C": 2,
+    "DE": 4, "DT": 4, "OLB": 4, "MLB": 3, "CB": 6, "S": 4, "K": 1, "P": 1
+}
+
+POS_WEIGHTS = {
+    "QB": 1.85, "DE": 1.40, "OT": 1.35, "WR": 1.30, "CB": 1.25,
+    "DT": 1.15, "OLB": 1.10, "MLB": 1.00, "S": 0.95, "TE": 0.90,
+    "RB": 0.85, "OG": 0.85, "C": 0.80, "P": 0.40, "K": 0.35
+}
+
+# Potential Tier System
+POTENTIAL_TIERS = [
+    ("Generational", 95, 99, 0.02),
+    ("All-Pro", 88, 94, 0.08),
+    ("All-Star", 82, 87, 0.20),
+    ("Starter", 75, 81, 0.40),
+    ("Role Player", 68, 74, 0.20),
+    ("Depth/Backup", 55, 67, 0.10)
+]
+
+DEV_TRAITS = ["Normal", "Star", "Superstar", "X-Factor"]
+DEV_WEIGHTS = [0.60, 0.22, 0.12, 0.06]
+
+ATHLETIC_ATTRS = {"SPD": "Speed", "ACC": "Acceleration", "STR": "Strength", "AGI": "Agility", "JMP": "Jumping"}
+FOOTBALL_ATTRS = {
+    "QB":  {"THP": "Throw Power", "SAC": "Short Acc", "MAC": "Med Acc", "DAC": "Deep Acc"},
+    "RB":  {"CAR": "Carrying", "BCV": "BC Vision", "BTK": "Break Tackle", "ELU": "Elusiveness"},
+    "WR":  {"CTH": "Catching", "SRT": "Short Route", "MRT": "Med Route", "DRT": "Deep Route"},
+    "TE":  {"CTH": "Catching", "PBK": "Pass Block", "RBK": "Run Block"},
+    "OT":  {"PBK": "Pass Block", "RBK": "Run Block", "IBK": "Impact Block"},
+    "OG":  {"PBK": "Pass Block", "RBK": "Run Block", "IBK": "Impact Block"},
+    "C":   {"PBK": "Pass Block", "RBK": "Run Block", "AWR": "Awareness"},
+    "DE":  {"PMV": "Power Moves", "FMV": "Finesse Moves", "BSH": "Block Shedding"},
+    "DT":  {"BSH": "Block Shedding", "PMV": "Power Moves", "TAK": "Tackling"},
+    "OLB": {"TAK": "Tackling", "BSH": "Block Shedding", "ZCV": "Zone Coverage"},
+    "MLB": {"TAK": "Tackling", "PUR": "Pursuit", "MCV": "Man Coverage"},
+    "CB":  {"MCV": "Man Coverage", "ZCV": "Zone Coverage", "PRS": "Press"},
+    "S":   {"ZCV": "Zone Coverage", "TAK": "Tackling", "POW": "Hit Power"},
+    "K":   {"KPW": "Kick Power", "KAC": "Kick Accuracy"},
+    "P":   {"KPW": "Kick Power", "KAC": "Kick Accuracy"}
+}
+
+FIRST_NAMES = ["James", "Marcus", "Caleb", "Jayden", "Malik", "Drake", "Devonte", "Trey", "Xavier", "Jalen", "Quentin", "Brock", "Cooper", "Jaxson"]
+LAST_NAMES = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Davis", "Miller", "Harrison", "Walker", "Carter", "Nixon", "Mitchell", "Alt"]
+COLLEGES = ["Alabama", "Georgia", "Ohio State", "LSU", "USC", "Michigan", "Texas", "Oregon", "Notre Dame", "Penn State"]
+
+# ==============================================================================
+# 2. GENERATION ENGINES
+# ==============================================================================
+
+def assign_potential_tier():
+    weights = [p[3] for p in POTENTIAL_TIERS]
+    chosen = random.choices(POTENTIAL_TIERS, weights=weights)[0]
+    tier_name = chosen[0]
+    pot_value = random.randint(chosen[1], chosen[2])
+    return tier_name, pot_value
+
+def calculate_combine_results(attrs):
+    spd = attrs.get("SPD", 70)
+    str_attr = attrs.get("STR", 70)
+    jmp = attrs.get("JMP", 70)
+    agi = attrs.get("AGI", 70)
+    return {
+        "40yd Dash": round(5.40 - (spd / 99) * 1.15 + random.uniform(-0.03, 0.03), 2),
+        "Bench": max(2, int((str_attr / 99) * 34 + random.randint(-2, 2))),
+        "Vertical": round((jmp / 99) * 18 + 24.0 + random.uniform(-0.5, 0.5), 1),
+        "3-Cone": round(8.00 - (agi / 99) * 1.30 + random.uniform(-0.04, 0.04), 2)
+    }
+
+def compute_dynamic_ovr(pos, attrs):
+    ath_score = sum(attrs[a] for a in ATHLETIC_ATTRS.keys()) / len(ATHLETIC_ATTRS)
+    fb_keys = list(FOOTBALL_ATTRS.get(pos, ATHLETIC_ATTRS).keys())
+    fb_score = sum(attrs[f] for f in fb_keys) / len(fb_keys)
+    ath_w, fb_w = (0.5, 0.5) if pos in ["WR", "RB", "CB"] else ((0.3, 0.7) if pos in ["QB", "OT", "OG", "C"] else (0.4, 0.6))
+    return round((ath_score * ath_w) + (fb_score * fb_w)), round(ath_score), round(fb_score)
+
+def generate_player(p_id, pos=None, min_ovr=55, max_ovr=90, is_prospect=False, rank=1):
+    name = f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
+    pos = pos if pos else random.choice(POSITIONS)
+    target_ovr = random.randint(min_ovr, max_ovr)
+    
+    attrs = {a: max(45, min(99, int(random.gauss(target_ovr, 5)))) for a in ATHLETIC_ATTRS.keys()}
+    for f in FOOTBALL_ATTRS.get(pos, {}).keys():
+        attrs[f] = max(45, min(99, int(random.gauss(target_ovr, 5))))
+        
+    true_ovr, ath_r, fb_r = compute_dynamic_ovr(pos, attrs)
+    tier_name, potential_ovr = assign_potential_tier()
+    
+    # Potential must be at least equal to current overall
+    potential_ovr = max(true_ovr, potential_ovr)
+    dev_trait = random.choices(DEV_TRAITS, weights=DEV_WEIGHTS)[0]
+    
+    exp = random.randint(0, 10) if not is_prospect else 0
+    salary = round(max(0.8, (true_ovr / 99) ** 3.3 * 28.0 * POS_WEIGHTS[pos] / 1.5), 2) if not is_prospect else 0.0
+    contract_years = random.randint(1, 4) if not is_prospect else 0
+
+    tag = "Standard"
+    if is_prospect:
+        if rank > 32 and true_ovr >= 78: tag = "💎 Hidden Gem"
+        elif rank <= 20 and true_ovr <= 68: tag = "💣 Bust Warning"
+        elif tier_name == "Generational": tag = "🌟 Generational Talent"
+
+    return {
+        "ID": p_id, "Name": name, "Position": pos, "College": random.choice(COLLEGES),
+        "Age": 21 if is_prospect else 22 + exp, "Experience": exp,
+        "True OVR": true_ovr, "Potential Tier": tier_name, "Potential OVR": potential_ovr,
+        "Athletic": ath_r, "Skill": fb_r, "Salary": salary, "Contract Years": contract_years,
+        "Attributes": attrs, "Combine": calculate_combine_results(attrs),
+        "Dev Trait": dev_trait, "Tag": tag, "Rank": rank, "Custom Rank": rank,
+        "Scouted": False, "Full Scouted": False
+    }
+
+def generate_initial_league():
+    rosters = {team: [] for team in NFL_TEAMS}
+    p_counter = 1000
+    
+    # Generate full 53-Man Rosters per team
+    for team in NFL_TEAMS:
+        for pos, count in ROSTER_53_DISTRIBUTION.items():
+            for i in range(count):
+                # Starters generated with higher OVR bounds than backups
+                if i == 0:
+                    player = generate_player(p_counter, pos=pos, min_ovr=75, max_ovr=95, is_prospect=False)
+                else:
+                    player = generate_player(p_counter, pos=pos, min_ovr=58, max_ovr=78, is_prospect=False)
+                rosters[team].append(player)
+                p_counter += 1
+                
+    # Free Agent Pool
+    free_agents = []
+    for _ in range(60):
+        fa = generate_player(p_counter, min_ovr=56, max_ovr=80, is_prospect=False)
+        fa["Salary"] = round(max(0.9, (fa["True OVR"] / 99) ** 3.0 * 15.0), 2)
+        fa["Contract Years"] = random.randint(1, 3)
+        free_agents.append(fa)
+        p_counter += 1
+        
+    return rosters, free_agents, p_counter
+
+def generate_draft_class(start_id):
+    prospects = []
+    for i in range(1, 129):  # 4 Rounds deep draft pool
+        prospects.append(generate_player(start_id + i, min_ovr=55, max_ovr=88, is_prospect=True, rank=i))
+    return pd.DataFrame(prospects)
+
+def generate_season_schedule():
+    schedule = []
+    teams = NFL_TEAMS.copy()
+    for week in range(1, 18):
+        random.shuffle(teams)
+        for i in range(0, len(teams), 2):
+            schedule.append({
+                "Week": week, "Home": teams[i], "Away": teams[i+1],
+                "Simulated": False, "Home Score": 0, "Away Score": 0
+            })
+    return pd.DataFrame(schedule)
+
+# ==============================================================================
+# 3. INITIALIZATION & SESSION STATE
+# ==============================================================================
+st.set_page_config(page_title="NFL Franchise GM Engine", layout="wide", page_icon="🏈")
+
+if "initialized" not in st.session_state:
+    st.session_state.rosters, st.session_state.free_agents, st.session_state.next_pid = generate_initial_league()
+    st.session_state.prospects = generate_draft_class(st.session_state.next_pid)
+    st.session_state.schedule = generate_season_schedule()
+    st.session_state.user_team = "Chicago Bears"
+    st.session_state.current_season = 2026
+    st.session_state.current_week = 1
+    st.session_state.phase = "Regular Season"
+    st.session_state.scouting_points = DEFAULT_SCOUTING_PTS
+    st.session_state.draft_history = []
+    st.session_state.current_pick_index = 0
+    
+    st.session_state.draft_order = pd.DataFrame([
+        {"Overall": i, "Round": (i-1)//32 + 1, "Pick": ((i-1)%32) + 1, "Team": team}
+        for i, team in enumerate(random.sample(NFL_TEAMS, 32) * 4, 1)
+    ])
+    st.session_state.initialized = True
+
+def get_team_ovr(team_name):
+    players = st.session_state.rosters.get(team_name, [])
+    if not players: return 70
+    return round(sum(p["True OVR"] for p in players) / len(players))
+
+def get_team_cap_space(team_name):
+    players = st.session_state.rosters.get(team_name, [])
+    total_payroll = sum(p["Salary"] for p in players)
+    return round(SALARY_CAP_LIMIT - total_payroll, 2)
+
+def get_standings():
+    records = {team: {"W": 0, "L": 0, "PF": 0, "PA": 0} for team in NFL_TEAMS}
+    simmed = st.session_state.schedule[st.session_state.schedule["Simulated"]]
+    for _, g in simmed.iterrows():
+        if g["Home Score"] > g["Away Score"]:
+            records[g["Home"]]["W"] += 1
+            records[g["Away"]]["L"] += 1
+        else:
+            records[g["Away"]]["W"] += 1
+            records[g["Home"]]["L"] += 1
+        records[g["Home"]]["PF"] += g["Home Score"]
+        records[g["Home"]]["PA"] += g["Away Score"]
+        records[g["Away"]]["PF"] += g["Away Score"]
+        records[g["Away"]]["PA"] += g["Home Score"]
+    
+    df = pd.DataFrame.from_dict(records, orient="index")
+    df["Players"] = [len(st.session_state.rosters[t]) for t in df.index]
+    df["OVR"] = [get_team_ovr(t) for t in df.index]
+    df["Cap Space ($M)"] = [get_team_cap_space(t) for t in df.index]
+    return df.sort_values(by=["W", "PF"], ascending=False)
+
+# ==============================================================================
+# 4. SIDEBAR & FRONT OFFICE
+# ==============================================================================
+with st.sidebar:
+    st.header("⚙️ Franchise Dashboard")
+    st.session_state.user_team = st.selectbox("Your Team", NFL_TEAMS, index=NFL_TEAMS.index(st.session_state.user_team))
+    
+    st.markdown("---")
+    st.write(f"**Season:** {st.session_state.current_season}")
+    st.write(f"**Phase:** {st.session_state.phase}")
+    if st.session_state.phase == "Regular Season":
+        st.write(f"**Current Week:** Week {st.session_state.current_week} / 17")
+    st.write(f"**Cap Space:** `${get_team_cap_space(st.session_state.user_team)}M`")
+    st.write(f"**Team Rating:** `{get_team_ovr(st.session_state.user_team)} OVR`")
+    st.write(f"**Roster Depth:** `{len(st.session_state.rosters[st.session_state.user_team])} / 53`")
+    st.metric("Scouting Points", st.session_state.scouting_points)
+    st.markdown("---")
+    
+    if st.button("Reset Entire Franchise"):
+        st.session_state.clear()
+        st.rerun()
+
+st.title("🏈 NFL GM Franchise Mode Engine")
+
+tab_office, tab_roster, tab_sim, tab_fa, tab_draft, tab_scout = st.tabs([
+    "🏢 Standings & League",
+    "📋 53-Man Roster & Contracts",
+    "🗓️ Calendar & Game Sim",
+    "💵 Free Agency Market",
+    "🚀 NFL Draft Engine",
+    "🔍 Scouting & Potential"
+])
+
+# ==============================================================================
+# TAB 1: LEAGUE & STANDINGS
+# ==============================================================================
+with tab_office:
+    st.header("League Standings & Overview")
+    st.dataframe(get_standings(), use_container_width=True)
+
+# ==============================================================================
+# TAB 2: ROSTER & CONTRACTS
+# ==============================================================================
+with tab_roster:
+    user_p = st.session_state.rosters[st.session_state.user_team]
+    st.header(f"Roster Management - {st.session_state.user_team} ({len(user_p)}/53 Players)")
+    
+    user_roster = pd.DataFrame(user_p)
+    display_cols = ["ID", "Name", "Position", "Age", "True OVR", "Potential Tier", "Potential OVR", "Salary", "Contract Years", "Dev Trait"]
+    st.dataframe(user_roster[display_cols], use_container_width=True)
+    
+    c_cut, c_ext = st.columns(2)
+    with c_cut:
+        st.subheader("Cut Player")
+        cut_pid = st.selectbox("Select Player to Cut", user_roster["ID"].tolist(), format_func=lambda x: f"{user_roster[user_roster['ID']==x]['Name'].values[0]} ({user_roster[user_roster['ID']==x]['Position'].values[0]})")
+        if st.button("Cut Player"):
+            st.session_state.rosters[st.session_state.user_team] = [p for p in user_p if p["ID"] != cut_pid]
+            st.success("Player released.")
+            st.rerun()
+            
+    with c_ext:
+        st.subheader("Extend Contract")
+        ext_pid = st.selectbox("Select Player to Extend", user_roster["ID"].tolist(), format_func=lambda x: f"{user_roster[user_roster['ID']==x]['Name'].values[0]} ({user_roster[user_roster['ID']==x]['Contract Years'].values[0]} Yrs Left)")
+        ext_years = st.slider("Additional Years", 1, 4, 2)
+        ext_salary = st.number_input("New Annual Salary ($M)", 1.0, 45.0, 8.0)
+        if st.button("Submit Extension"):
+            for p in user_p:
+                if p["ID"] == ext_pid:
+                    p["Contract Years"] += ext_years
+                    p["Salary"] = round(ext_salary, 2)
+                    st.success("Extension Signed!")
+                    st.rerun()
+
+# ==============================================================================
+# TAB 3: CALENDAR & GAME SIMULATION
+# ==============================================================================
+with tab_sim:
+    st.header("Calendar & Simulation Control")
+    if st.session_state.phase == "Regular Season":
+        st.subheader(f"Week {st.session_state.current_week} Games")
+        curr_games = st.session_state.schedule[st.session_state.schedule["Week"] == st.session_state.current_week]
+        st.dataframe(curr_games[["Home", "Away", "Simulated", "Home Score", "Away Score"]], use_container_width=True)
+        
+        if st.button("Simulate Week"):
+            for idx, row in curr_games.iterrows():
+                if not row["Simulated"]:
+                    h_score = max(0, int(np.random.normal(21 + (get_team_ovr(row['Home']) - 75)*0.4, 6)))
+                    a_score = max(0, int(np.random.normal(18 + (get_team_ovr(row['Away']) - 75)*0.4, 6)))
+                    if h_score == a_score: h_score += 3
+                    st.session_state.schedule.loc[idx, "Home Score"] = h_score
+                    st.session_state.schedule.loc[idx, "Away Score"] = a_score
+                    st.session_state.schedule.loc[idx, "Simulated"] = True
+            if st.session_state.current_week < 17:
+                st.session_state.current_week += 1
+            else:
+                st.session_state.phase = "Offseason - Free Agency"
+            st.rerun()
+    else:
+        st.info(f"Offseason Phase: **{st.session_state.phase}**")
+        if st.button("Advance Phase"):
+            if st.session_state.phase == "Offseason - Free Agency":
+                st.session_state.phase = "NFL Draft"
+            elif st.session_state.phase == "NFL Draft":
+                st.session_state.phase = "Regular Season"
+                st.session_state.current_season += 1
+                st.session_state.current_week = 1
+                st.session_state.schedule = generate_season_schedule()
+                st.session_state.prospects = generate_draft_class(st.session_state.next_pid)
+                st.session_state.scouting_points = DEFAULT_SCOUTING_PTS
+                st.session_state.draft_history = []
+                st.session_state.current_pick_index = 0
+            st.rerun()
+
+# ==============================================================================
+# TAB 4: FREE AGENCY
+# ==============================================================================
+with tab_fa:
+    st.header("Free Agency Market")
+    fa_df = pd.DataFrame(st.session_state.free_agents)
+    if not fa_df.empty:
+        st.dataframe(fa_df[["ID", "Name", "Position", "Age", "True OVR", "Potential Tier", "Salary", "Contract Years"]], use_container_width=True)
+        
+        fa_pid = st.selectbox("Select Player", fa_df["ID"].tolist(), format_func=lambda x: f"{fa_df[fa_df['ID']==x]['Name'].values[0]} ({fa_df[fa_df['ID']==x]['Position'].values[0]} | {fa_df[fa_df['ID']==x]['True OVR'].values[0]} OVR)")
+        target_fa = next(p for p in st.session_state.free_agents if p["ID"] == fa_pid)
+        
+        c_off1, c_off2 = st.columns(2)
+        sal_offer = c_off1.number_input("Salary Offer ($M)", 0.8, 45.0, float(target_fa["Salary"]))
+        yrs_offer = c_off2.slider("Years Offer", 1, 4, int(target_fa["Contract Years"]))
+        
+        if st.button("Sign Free Agent"):
+            if len(st.session_state.rosters[st.session_state.user_team]) >= 53:
+                st.error("Roster is full (53/53 players). Cut a player first.")
+            elif get_team_cap_space(st.session_state.user_team) >= sal_offer:
+                target_fa["Salary"] = round(sal_offer, 2)
+                target_fa["Contract Years"] = yrs_offer
+                st.session_state.rosters[st.session_state.user_team].append(target_fa)
+                st.session_state.free_agents = [p for p in st.session_state.free_agents if p["ID"] != fa_pid]
+                st.success(f"Signed {target_fa['Name']}!")
+                st.rerun()
+            else:
+                st.error("Offer exceeds available cap space.")
+
+# ==============================================================================
+# TAB 5: DRAFT ENGINE
+# ==============================================================================
+with tab_draft:
+    st.header("NFL Draft Simulation")
+    total_picks = len(st.session_state.draft_order)
+    curr_idx = st.session_state.current_pick_index
+    
+    if curr_idx < total_picks:
+        current_pick = st.session_state.draft_order.iloc[curr_idx]
+        st.info(f"**ON THE CLOCK:** Round {current_pick['Round']} Pick {current_pick['Pick']} (#{current_pick['Overall']} Overall) - **{current_pick['Team']}**")
+        
+        available = st.session_state.prospects[~st.session_state.prospects["ID"].isin([h["Prospect ID"] for h in st.session_state.draft_history])].copy()
+        
+        if current_pick["Team"] == st.session_state.user_team:
+            user_pick_id = st.selectbox("Select Draft Prospect", available["ID"].tolist(), format_func=lambda x: f"#{available[available['ID']==x]['Rank'].values[0]} | {available[available['ID']==x]['Name'].values[0]} ({available[available['ID']==x]['Position'].values[0]})")
+            if st.button("Draft Prospect"):
+                p_sel = available[available["ID"] == user_pick_id].iloc[0].to_dict()
+                p_sel["Salary"] = 3.5
+                p_sel["Contract Years"] = 4
+                st.session_state.rosters[st.session_state.user_team].append(p_sel)
+                st.session_state.draft_history.append({"Pick": current_pick["Overall"], "Team": current_pick["Team"], "Prospect ID": p_sel["ID"], "Name": p_sel["Name"], "Position": p_sel["Position"], "OVR": p_sel["True OVR"], "Potential": p_sel["Potential Tier"]})
+                st.session_state.current_pick_index += 1
+                st.rerun()
+        else:
+            if st.button("Simulate Pick"):
+                chosen_p = available.sort_values("Rank").iloc[0].to_dict()
+                chosen_p["Salary"] = 3.5
+                chosen_p["Contract Years"] = 4
+                st.session_state.rosters[current_pick["Team"]].append(chosen_p)
+                st.session_state.draft_history.append({"Pick": current_pick["Overall"], "Team": current_pick["Team"], "Prospect ID": chosen_p["ID"], "Name": chosen_p["Name"], "Position": chosen_p["Position"], "OVR": chosen_p["True OVR"], "Potential": chosen_p["Potential Tier"]})
+                st.session_state.current_pick_index += 1
+                st.rerun()
+                
+    st.subheader("Draft History")
+    if st.session_state.draft_history:
+        st.dataframe(pd.DataFrame(st.session_state.draft_history), use_container_width=True)
+
+# ==============================================================================
+# TAB 6: SCOUTING HUB & POTENTIALS
+# ==============================================================================
+with tab_scout:
+    st.header("Draft Scouting & Potential Tiers")
+    
+    prospect_list = st.session_state.prospects.copy()
+    prospect_list["True OVR Display"] = prospect_list.apply(lambda r: r["True OVR"] if r["Scouted"] else "???", axis=1)
+    prospect_list["Potential Tier Display"] = prospect_list.apply(lambda r: r["Potential Tier"] if r["Scouted"] else "???", axis=1)
+    prospect_list["Potential OVR Display"] = prospect_list.apply(lambda r: r["Potential OVR"] if r["Full Scouted"] else "???", axis=1)
+    
+    selected_scout_id = st.selectbox("Select Prospect to Scout", prospect_list["ID"].tolist(), format_func=lambda x: f"#{x} - {prospect_list[prospect_list['ID']==x]['Name'].values[0]}")
+    p_idx = st.session_state.prospects[st.session_state.prospects["ID"] == selected_scout_id].index[0]
+    p_data = st.session_state.prospects.loc[p_idx]
+    
+    sc1, sc2 = st.columns(2)
+    with sc1:
+        st.write(f"**Name:** {p_data['Name']} | **Pos:** {p_data['Position']}")
+        st.write(f"**College:** {p_data['College']}")
+        st.write(f"**Current OVR:** {p_data['True OVR'] if p_data['Scouted'] else 'Locked'}")
+        st.write(f"**Potential Tier:** {p_data['Potential Tier'] if p_data['Scouted'] else 'Locked'}")
+        st.write(f"**Potential OVR Ceiling:** {p_data['Potential OVR'] if p_data['Full Scouted'] else 'Locked'}")
+    with sc2:
+        if not p_data["Scouted"]:
+            if st.button("Basic Scout (10 Pts)"):
+                if st.session_state.scouting_points >= 10:
+                    st.session_state.scouting_points -= 10
+                    st.session_state.prospects.loc[p_idx, "Scouted"] = True
+                    st.rerun()
+        if p_data["Scouted"] and not p_data["Full Scouted"]:
+            if st.button("Deep Scout (15 Pts)"):
+                if st.session_state.scouting_points >= 15:
+                    st.session_state.scouting_points -= 15
+                    st.session_state.prospects.loc[p_idx, "Full Scouted"] = True
+                    st.rerun()
+
+    st.dataframe(prospect_list[["Custom Rank", "Rank", "Name", "Position", "College", "True OVR Display", "Potential Tier Display", "Potential OVR Display"]], use_container_width=True)
